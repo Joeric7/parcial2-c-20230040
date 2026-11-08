@@ -35,6 +35,8 @@
 #define MODO_RUN   0
 #define MODO_PAUSA 1
 #define ADC_MAX 4095
+#define THR_INICIAL 70   // umbral inicial en %
+#define HISTERESIS  5    // la alarma apaga cuando pct < thr - 5
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -66,6 +68,8 @@ uint32_t ms_adc = 0;           // cuenta para muestrear cada 100 ms
 uint32_t cont_muestras = 0;    // cuantas lecturas van (prueba de tiempo)
 
 uint32_t pct = 0;   // porcentaje de la ultima lectura (0 a 100)
+uint32_t thr = THR_INICIAL;   // umbral actual
+uint32_t alarma = 0;          // 1 = alarma encendida
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -78,6 +82,7 @@ static void MX_USART2_UART_Init(void);
 void boton_actualizar(void);
 uint32_t tomar_flanco(void);
 void leer_adc(void);
+void evaluar_alarma(void);
 uint32_t adc_a_pct(uint32_t valor);
 /* USER CODE END PFP */
 
@@ -471,8 +476,28 @@ void leer_adc(void) {
 		pct = adc_a_pct(adc_valor);
 		muestra_valida = 1;
 		cont_muestras++;
+		evaluar_alarma();
 	}
 	HAL_ADC_Stop(&hadc1);
+}
+
+// Decide si la alarma enciende o apaga, con histeresis
+void evaluar_alarma(void) {
+	if (muestra_valida == 0) {
+		return;   // todavia no hay lectura
+	}
+	if (modo != MODO_RUN) {
+		return;   // en pausa se maneja en la etapa 8
+	}
+
+	if (pct >= thr) {
+		alarma = 1;
+	} else if (pct + HISTERESIS < thr) {
+		alarma = 0;   // pct < thr - 5, escrito asi para no restar sin signo
+	}
+	// en la banda intermedia no se toca: conserva su estado
+
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, (GPIO_PinState) alarma);
 }
 /* USER CODE END 4 */
 
