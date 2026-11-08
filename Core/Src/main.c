@@ -48,7 +48,13 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 volatile uint32_t g_ms = G_MS_INICIAL;   // milisegundos (lo suma TIM4)
+volatile uint32_t g_flanco = 0;   // la ISR lo pone en 1 cuando el botón cambia
+
 uint32_t ms_actividad = 0;               // cuenta para el led de actividad
+uint32_t boton_estable = 0;       // 1 = presionado, 0 = suelto (ya confirmado)
+uint32_t cuenta_cambio = 0;       // ms que lleva la lectura distinta del estado confirmado
+uint32_t cont_pulsaciones = 0;    // pulsaciones validas
+uint32_t evento_boton = 0;        // lo pone el boton, lo consume main
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -58,7 +64,8 @@ static void MX_TIM4_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+void boton_actualizar(void);
+uint32_t tomar_flanco(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -118,6 +125,13 @@ int main(void) {
 			if (ms_actividad >= 500) {
 				ms_actividad = 0;
 				HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+			}
+
+			boton_actualizar();
+			// prueba temporal el led de alarma cambia con cada pulsacion
+			if (evento_boton == 1) {
+				evento_boton = 0;
+				HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
 			}
 		}
 	}
@@ -358,6 +372,50 @@ static void MX_GPIO_Init(void) {
 }
 
 /* USER CODE BEGIN 4 */
+// ISR del boton
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	if (GPIO_Pin == GPIO_PIN_13) {
+		g_flanco = 1;
+	}
+}
+
+// Lee la nota y la borra sin que la ISR se meta en medio
+uint32_t tomar_flanco(void) {
+	__disable_irq();
+	uint32_t hubo = g_flanco;
+	g_flanco = 0;
+	__enable_irq();
+	return hubo;
+}
+
+// Se llama una vez por ms
+void boton_actualizar(void) {
+	// 1 = presionado (en la placa presionado lee 0)
+	uint32_t lectura = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET);
+
+	// Si hubo un flanco, reinicia la espera de 30 ms
+	if (tomar_flanco() == 1) {
+		cuenta_cambio = 0;
+	}
+
+	// Antirrebote
+	if (lectura == boton_estable) {
+		cuenta_cambio = 0;
+	} else {
+		cuenta_cambio++;
+		if (cuenta_cambio >= 30) {
+			cuenta_cambio = 0;
+			boton_estable = lectura;
+
+			if (boton_estable == 1) {   // pulsacion confirmada
+				cont_pulsaciones++;
+				evento_boton = 1;
+			}
+			// la liberacion tambien se confirma aqui, antes de aceptar otra
+		}
+	}
+}
+
 // Se llama sola cada 1 ms
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	if (htim->Instance == TIM4) {
