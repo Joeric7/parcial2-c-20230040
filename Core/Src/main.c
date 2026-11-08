@@ -34,6 +34,7 @@
 #define G_MS_INICIAL 0
 #define MODO_RUN   0
 #define MODO_PAUSA 1
+#define ADC_MAX 4095
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -63,6 +64,8 @@ uint32_t adc_valor = 0;        // ultima lectura del adc (0 a 4095)
 uint32_t muestra_valida = 0;   // 1 = ya hay al menos una lectura
 uint32_t ms_adc = 0;           // cuenta para muestrear cada 100 ms
 uint32_t cont_muestras = 0;    // cuantas lecturas van (prueba de tiempo)
+
+uint32_t pct = 0;   // porcentaje de la ultima lectura (0 a 100)
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -75,6 +78,7 @@ static void MX_USART2_UART_Init(void);
 void boton_actualizar(void);
 uint32_t tomar_flanco(void);
 void leer_adc(void);
+uint32_t adc_a_pct(uint32_t valor);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -403,6 +407,11 @@ static void MX_GPIO_Init(void) {
 }
 
 /* USER CODE BEGIN 4 */
+// Convierte la lectura del adc (0 a 4095) a porcentaje (0 a 100) con redondeo
+uint32_t adc_a_pct(uint32_t valor) {
+	// se usa 32 bits: 100 * 4095 = 409500, no cabe en 16 bits
+	return (100 * valor + ADC_MAX / 2) / ADC_MAX;
+}
 // ISR del boton
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 	if (GPIO_Pin == GPIO_PIN_13) {
@@ -459,6 +468,7 @@ void leer_adc(void) {
 	HAL_ADC_Start(&hadc1);
 	if (HAL_ADC_PollForConversion(&hadc1, 5) == HAL_OK) {
 		adc_valor = HAL_ADC_GetValue(&hadc1);
+		pct = adc_a_pct(adc_valor);
 		muestra_valida = 1;
 		cont_muestras++;
 	}
