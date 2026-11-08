@@ -79,6 +79,7 @@ static void MX_TIM4_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
+void reiniciar_alarma(void);
 void boton_actualizar(void);
 uint32_t tomar_flanco(void);
 void leer_adc(void);
@@ -169,8 +170,11 @@ int main(void) {
 				evento_boton = 0;
 				if (modo == MODO_RUN) {
 					modo = MODO_PAUSA;
+					alarma = 0;   // en pausa la alarma se apaga
+					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
 				} else {
 					modo = MODO_RUN;
+					reiniciar_alarma();   // al reanudar se decide de nuevo
 				}
 			}
 		}
@@ -497,6 +501,19 @@ void evaluar_alarma(void) {
 	}
 	// en la banda intermedia no se toca: conserva su estado
 
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, (GPIO_PinState) alarma);
+}
+
+// Reinicia la decision de la alarma con la ultima muestra (sin histeresis)
+void reiniciar_alarma(void) {
+	if (muestra_valida == 0) {
+		return;   // espera la primera muestra, evaluar_alarma la atiende
+	}
+	if (pct >= thr) {
+		alarma = 1;
+	} else {
+		alarma = 0;
+	}
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, (GPIO_PinState) alarma);
 }
 /* USER CODE END 4 */
