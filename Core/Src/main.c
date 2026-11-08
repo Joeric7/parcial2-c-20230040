@@ -58,6 +58,11 @@ uint32_t boton_estable = 0;       // 1 = presionado, 0 = suelto (ya confirmado)
 uint32_t cuenta_cambio = 0;       // ms que lleva la lectura distinta del estado confirmado
 uint32_t cont_pulsaciones = 0;    // pulsaciones validas
 uint32_t evento_boton = 0;        // lo pone el boton, lo consume main
+
+uint32_t adc_valor = 0;        // ultima lectura del adc (0 a 4095)
+uint32_t muestra_valida = 0;   // 1 = ya hay al menos una lectura
+uint32_t ms_adc = 0;           // cuenta para muestrear cada 100 ms
+uint32_t cont_muestras = 0;    // cuantas lecturas van (prueba de tiempo)
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -69,6 +74,7 @@ static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void boton_actualizar(void);
 uint32_t tomar_flanco(void);
+void leer_adc(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -109,6 +115,18 @@ int main(void) {
 	MX_USART2_UART_Init();
 	/* USER CODE BEGIN 2 */
 	HAL_TIM_Base_Start_IT(&htim4);   // arranca el tick de 1 ms
+	// tiempo de muestreo largo para el potenciometro (61.5 ciclos)
+	ADC_ChannelConfTypeDef sConfig = { 0 };
+	sConfig.Channel = ADC_CHANNEL_1;
+	sConfig.Rank = ADC_REGULAR_RANK_1;
+	sConfig.SingleDiff = ADC_SINGLE_ENDED;
+	sConfig.SamplingTime = ADC_SAMPLETIME_61CYCLES_5;
+	sConfig.OffsetNumber = ADC_OFFSET_NONE;
+	sConfig.Offset = 0;
+	HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
+	// calibracion del adc (se hace una vez al arrancar)
+	HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
 
 	uint32_t h_tick = g_ms;
 	/* USER CODE END 2 */
@@ -131,6 +149,12 @@ int main(void) {
 			}
 
 			boton_actualizar();
+			// una muestra cada 100 ms del adc(sigue en RUN y en PAUSA)
+			ms_adc++;
+			if (ms_adc >= 100) {
+				ms_adc = 0;
+				leer_adc();
+			}
 			// una pulsacion valida cambia entre RUN y PAUSA
 			if (evento_boton == 1) {
 				evento_boton = 0;
@@ -140,6 +164,7 @@ int main(void) {
 					modo = MODO_RUN;
 				}
 			}
+		}
 	}
 	/* USER CODE END 3 */
 }
@@ -427,6 +452,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	if (htim->Instance == TIM4) {
 		g_ms = g_ms + 1;
 	}
+}
+
+// Lee el adc una vez, la conversion dura unos microsegundos
+void leer_adc(void) {
+	HAL_ADC_Start(&hadc1);
+	if (HAL_ADC_PollForConversion(&hadc1, 5) == HAL_OK) {
+		adc_valor = HAL_ADC_GetValue(&hadc1);
+		muestra_valida = 1;
+		cont_muestras++;
+	}
+	HAL_ADC_Stop(&hadc1);
 }
 /* USER CODE END 4 */
 
