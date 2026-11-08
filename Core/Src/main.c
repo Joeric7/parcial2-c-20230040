@@ -18,7 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-
+#include <stdio.h>
+#include <string.h>
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -37,6 +38,9 @@
 #define ADC_MAX 4095
 #define THR_INICIAL 70   // umbral inicial en %
 #define HISTERESIS  5    // la alarma apaga cuando pct < thr - 5
+#define RX_TAM    128   // tamano del buffer circular de entrada
+#define TX_TAM    512   // tamano del buffer circular de salida
+#define LINEA_MAX 32    // maximo de caracteres por linea (sin el terminador)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -70,6 +74,30 @@ uint32_t cont_muestras = 0;    // cuantas lecturas van (prueba de tiempo)
 uint32_t pct = 0;   // porcentaje de la ultima lectura (0 a 100)
 uint32_t thr = THR_INICIAL;   // umbral actual
 uint32_t alarma = 0;          // 1 = alarma encendida
+
+// uart: buffer circular de entrada
+uint8_t rx_buf[RX_TAM];
+volatile uint32_t rx_head = 0;   // donde escribe la ISR
+volatile uint32_t rx_tail = 0;   // donde lee main
+uint8_t rx_byte;                 // aqui llega cada caracter
+uint32_t rx_errores = 0;         // errores de la uart
+uint32_t rx_overflow = 0;        // veces que se lleno el buffer
+
+// uart: buffer circular de salida
+uint8_t tx_buf[TX_TAM];
+volatile uint32_t tx_head = 0;       // donde escribe main
+volatile uint32_t tx_tail = 0;       // donde lee la ISR
+volatile uint32_t tx_len = 0;        // tamano del bloque que se esta mandando
+volatile uint32_t tx_enviando = 0;   // 1 = hay un bloque saliendo
+uint32_t tx_perdidos = 0;            // caracteres descartados por buffer lleno
+
+// uart: linea que se esta armando
+char linea[LINEA_MAX + 1];       // +1 para el '\0'
+uint32_t linea_len = 0;          // cuantos caracteres lleva
+uint32_t descartando = 0;        // 1 = linea muy larga, ignoro hasta el LF
+
+// telemetria
+uint32_t ms_telemetria = 0;      // cuenta para mandar cada 1000 ms
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -85,6 +113,16 @@ uint32_t tomar_flanco(void);
 void leer_adc(void);
 void evaluar_alarma(void);
 uint32_t adc_a_pct(uint32_t valor);
+
+void poner_pausa(void);
+void poner_run(void);
+uint32_t rx_leer(uint8_t *c);
+uint32_t armar_linea(uint8_t c);
+void tx_iniciar(void);
+void enviar(const char *texto);
+void enviar_estado(void);
+uint32_t leer_numero(const char *s, uint32_t *valor);
+void procesar_linea(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -125,6 +163,7 @@ int main(void) {
 	MX_USART2_UART_Init();
 	/* USER CODE BEGIN 2 */
 	HAL_TIM_Base_Start_IT(&htim4);   // arranca el tick de 1 ms
+	HAL_UART_Receive_IT(&huart2, &rx_byte, 1);   // empieza a escuchar 1 byte
 	// tiempo de muestreo largo para el potenciometro (61.5 ciclos)
 	ADC_ChannelConfTypeDef sConfig = { 0 };
 	sConfig.Channel = ADC_CHANNEL_1;
@@ -165,17 +204,33 @@ int main(void) {
 				ms_adc = 0;
 				leer_adc();
 			}
+
+			// telemetria cada 1000 ms (sigue en RUN y en PAUSA)
+			ms_telemetria++;
+			if (ms_telemetria >= 1000) {
+				ms_telemetria = 0;
+				enviar_estado();
+			}
 			// una pulsacion valida cambia entre RUN y PAUSA
 			if (evento_boton == 1) {
 				evento_boton = 0;
 				if (modo == MODO_RUN) {
-					modo = MODO_PAUSA;
-					alarma = 0;   // en pausa la alarma se apaga
-					HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
+					poner_pausa();
 				} else {
-					modo = MODO_RUN;
-					reiniciar_alarma();   // al reanudar se decide de nuevo
+					poner_run();
 				}
+			}
+		}
+
+		// uart: leer lo que llego y armar lineas
+		uint8_t c;
+		while (rx_leer(&c) == 1) {
+			uint32_t r = armar_linea(c);
+
+			if (r == 1) {
+				procesar_linea();   // linea completa: ejecuta el comando
+			} else if (r == 2) {
+				enviar("ERR\r\n");  // linea muy larga
 			}
 		}
 	}
@@ -515,6 +570,236 @@ void reiniciar_alarma(void) {
 		alarma = 0;
 	}
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, (GPIO_PinState) alarma);
+}
+
+// Pasa a PAUSA: la alarma se apaga
+void poner_pausa(void) {
+	modo = MODO_PAUSA;
+	alarma = 0;
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
+}
+
+// Pasa a RUN. Si ya estaba en RUN no cambia nada (conserva la alarma)
+void poner_run(void) {
+	if (modo == MODO_RUN) {
+		return;
+	}
+	modo = MODO_RUN;
+	reiniciar_alarma();   // al reanudar se decide de nuevo
+}
+
+// ISR de la uart: llego un byte
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+	if (huart->Instance == USART2) {
+		uint32_t siguiente = (rx_head + 1) % RX_TAM;
+
+		if (siguiente == rx_tail) {
+			rx_overflow++;   // buffer lleno, se pierde el byte
+		} else {
+			rx_buf[rx_head] = rx_byte;
+			rx_head = siguiente;
+		}
+		HAL_UART_Receive_IT(&huart2, &rx_byte, 1);   // listo para el siguiente
+	}
+}
+
+// Si la uart tiene un error (por ejemplo overrun)
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+	if (huart->Instance == USART2) {
+		rx_errores++;
+		HAL_UART_Receive_IT(&huart2, &rx_byte, 1);   // volver a escuchar
+	}
+}
+
+// ISR de la uart: termino de salir un bloque
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+	if (huart->Instance == USART2) {
+		tx_tail = (tx_tail + tx_len) % TX_TAM;   // ese bloque ya salio
+		tx_enviando = 0;
+		tx_iniciar();                            // si queda algo, lo manda
+	}
+}
+
+// Saca un byte del buffer. Devuelve 1 si habia, 0 si estaba vacio
+uint32_t rx_leer(uint8_t *c) {
+	if (rx_tail == rx_head) {
+		return 0;
+	}
+	*c = rx_buf[rx_tail];
+	rx_tail = (rx_tail + 1) % RX_TAM;
+	return 1;
+}
+
+// Mete un caracter a la linea. Solo el LF termina la linea (el CR se ignora,
+// asi LF y CRLF funcionan igual).
+// Devuelve: 0 = nada, 1 = linea completa, 2 = linea muy larga
+uint32_t armar_linea(uint8_t c) {
+	if (c == '\r') {
+		return 0;   // el CR de un CRLF no hace nada
+	}
+
+	// fin de linea (LF)
+	if (c == '\n') {
+		if (descartando == 1) {
+			descartando = 0;
+			linea_len = 0;
+			return 2;   // la linea era muy larga: se descarta completa
+		}
+		if (linea_len > 0) {
+			linea[linea_len] = '\0';   // cierra el texto
+			linea_len = 0;
+			return 1;
+		}
+		return 0;   // linea vacia: se ignora
+	}
+
+	// caracter normal
+	if (descartando == 1) {
+		return 0;   // la linea se paso, ignoro hasta el LF
+	}
+	if (linea_len < LINEA_MAX) {
+		linea[linea_len] = (char) c;
+		linea_len++;
+	} else {
+		descartando = 1;   // llego el caracter 33
+	}
+	return 0;
+}
+
+// Manda por la uart el bloque que haya en el buffer de salida.
+// Solo arranca si no hay otro bloque saliendo.
+// (quien la llame desde main debe apagar las interrupciones un instante)
+void tx_iniciar(void) {
+	if (tx_enviando == 1 || tx_tail == tx_head) {
+		return;   // ya hay uno saliendo, o no hay nada que mandar
+	}
+
+	uint32_t h = tx_head;
+	uint32_t len;
+	if (h > tx_tail) {
+		len = h - tx_tail;          // todo seguido hasta head
+	} else {
+		len = TX_TAM - tx_tail;     // hasta el final del arreglo (luego da la vuelta)
+	}
+
+	tx_len = len;
+	tx_enviando = 1;
+	if (HAL_UART_Transmit_IT(&huart2, &tx_buf[tx_tail], len) != HAL_OK) {
+		tx_enviando = 0;   // no pudo arrancar, se reintenta en el siguiente enviar
+	}
+}
+
+// Manda un texto por la uart SIN esperar: lo copia al buffer y sigue
+void enviar(const char *texto) {
+	for (uint32_t i = 0; texto[i] != '\0'; i++) {
+		uint32_t siguiente = (tx_head + 1) % TX_TAM;
+
+		if (siguiente == tx_tail) {
+			tx_perdidos++;   // buffer lleno, descarto lo que sobra
+			break;
+		}
+		tx_buf[tx_head] = (uint8_t) texto[i];
+		tx_head = siguiente;
+	}
+
+	__disable_irq();
+	tx_iniciar();
+	__enable_irq();
+}
+
+// Arma la linea de estado y la manda. La usan la telemetria y STATUS
+void enviar_estado(void) {
+	const char *nombre = "RUN";
+	if (modo == MODO_PAUSA) {
+		nombre = "PAUSE";
+	}
+
+	char resp[100];
+	snprintf(resp, sizeof(resp),
+			"t=%lu;ADC=%lu;PCT=%lu;THR=%lu;MODE=%s;ALARM=%lu\r\n",
+			(unsigned long) (g_ms - G_MS_INICIAL), (unsigned long) adc_valor,
+			(unsigned long) pct, (unsigned long) thr, nombre,
+			(unsigned long) alarma);
+	enviar(resp);
+}
+
+// Revisa que s sea solo digitos y devuelve su valor en *valor.
+// Devuelve: 0 = bien, 1 = no es un numero limpio
+uint32_t leer_numero(const char *s, uint32_t *valor) {
+	if (s[0] == '\0') {
+		return 1;   // vacio
+	}
+
+	uint32_t v = 0;
+	for (uint32_t i = 0; s[i] != '\0'; i++) {
+		if (s[i] < '0' || s[i] > '9') {
+			return 1;   // letra, punto decimal, signo, etc
+		}
+		if (v < 1000) {
+			v = v * 10 + (s[i] - '0');   // si ya paso de 1000 no sigo, no desborda
+		}
+	}
+	*valor = v;
+	return 0;
+}
+
+// Ejecuta el comando que esta en linea
+void procesar_linea(void) {
+	// parte la linea en palabras (ignora espacios al inicio y al final)
+	char *cmd = strtok(linea, " \t");
+	char *arg = strtok(NULL, " \t");
+	char *extra = strtok(NULL, " \t");
+
+	if (cmd == NULL) {
+		return;   // solo habia espacios
+	}
+
+	if (strcmp(cmd, "STATUS") == 0) {
+		if (arg != NULL) {
+			enviar("ERR\r\n");
+		} else {
+			enviar_estado();
+		}
+	}
+
+	else if (strcmp(cmd, "THR") == 0) {
+		uint32_t n;
+		if (arg == NULL || extra != NULL) {
+			enviar("ERR\r\n");
+		} else if (leer_numero(arg, &n) != 0 || n < 10 || n > 95) {
+			enviar("ERR\r\n");   // texto, decimal o fuera de 10..95
+		} else {
+			thr = n;
+			if (modo == MODO_RUN) {
+				reiniciar_alarma();   // en pausa la alarma sigue apagada
+			}
+			char resp[24];
+			snprintf(resp, sizeof(resp), "OK THR=%lu\r\n", (unsigned long) n);
+			enviar(resp);
+		}
+	}
+
+	else if (strcmp(cmd, "START") == 0) {
+		if (arg != NULL) {
+			enviar("ERR\r\n");
+		} else {
+			poner_run();
+			enviar("OK RUN\r\n");
+		}
+	}
+
+	else if (strcmp(cmd, "STOP") == 0) {
+		if (arg != NULL) {
+			enviar("ERR\r\n");
+		} else {
+			poner_pausa();
+			enviar("OK PAUSE\r\n");
+		}
+	}
+
+	else {
+		enviar("ERR\r\n");   // comando desconocido
+	}
 }
 /* USER CODE END 4 */
 
