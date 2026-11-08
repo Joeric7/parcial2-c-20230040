@@ -32,6 +32,8 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define G_MS_INICIAL 0
+#define MODO_RUN   0
+#define MODO_PAUSA 1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -50,6 +52,7 @@ UART_HandleTypeDef huart2;
 volatile uint32_t g_ms = G_MS_INICIAL;   // milisegundos (lo suma TIM4)
 volatile uint32_t g_flanco = 0;   // la ISR lo pone en 1 cuando el botón cambia
 
+uint32_t modo = MODO_RUN;   // despues de cada reinicio arranca en RUN
 uint32_t ms_actividad = 0;               // cuenta para el led de actividad
 uint32_t boton_estable = 0;       // 1 = presionado, 0 = suelto (ya confirmado)
 uint32_t cuenta_cambio = 0;       // ms que lleva la lectura distinta del estado confirmado
@@ -128,12 +131,15 @@ int main(void) {
 			}
 
 			boton_actualizar();
-			// prueba temporal el led de alarma cambia con cada pulsacion
+			// una pulsacion valida cambia entre RUN y PAUSA
 			if (evento_boton == 1) {
 				evento_boton = 0;
-				HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
+				if (modo == MODO_RUN) {
+					modo = MODO_PAUSA;
+				} else {
+					modo = MODO_RUN;
+				}
 			}
-		}
 	}
 	/* USER CODE END 3 */
 }
